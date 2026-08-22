@@ -10,7 +10,7 @@ pipeline {
     stages {
         stage('Checkout') {
             steps {
-                echo 'Checking out source code from Git...'
+                echo 'Checking out source code from Git repository...'
                 checkout scm
             }
         }
@@ -61,7 +61,7 @@ pipeline {
                 echo 'Verifying container deployment health...'
                 script {
                     if (isUnix()) {
-                        sh 'curl -s http://localhost:8085 | grep -i "OmniPolicy"'
+                        sh 'docker exec ${CONTAINER_NAME} wget -qO- http://localhost:80 | grep -i "OmniPolicy"'
                     } else {
                         bat 'curl -s http://localhost:8085 | findstr /I "OmniPolicy"'
                     }
