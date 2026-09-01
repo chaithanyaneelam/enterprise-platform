@@ -2,80 +2,152 @@ pipeline {
     agent any
 
     environment {
+        AWS_HOST = '16.171.33.162'
+        AWS_USER = 'ubuntu'
+        CONTAINER_NAME = 'enterprise-platform'
         IMAGE_NAME = 'enterprise-platform:latest'
-        CONTAINER_NAME = 'enterprise-platform-container'
-        HOST_PORT = '8085'
+        HOST_PORT = '80'
     }
 
     stages {
+
         stage('Checkout') {
             steps {
-                echo 'Checking out source code from Git repository...'
+                echo 'Checking out source code from GitHub...'
                 checkout scm
             }
         }
 
         stage('Code Validation') {
             steps {
-                echo 'Validating frontend assets & static configurations...'
-                script {
-                    if (isUnix()) {
-                        sh 'ls -la index.html styles.css app.js Dockerfile'
-                    } else {
-                        bat 'dir index.html styles.css app.js Dockerfile'
-                    }
+                echo 'Validating project files...'
+
+                sh '''
+                    ls -la
+                    test -f index.html
+                    test -f styles.css
+                    test -f app.js
+                    test -f Dockerfile
+                    test -f Jenkinsfile
+                '''
+            }
+        }
+
+        stage('Test AWS SSH Connection') {
+            steps {
+                echo 'Testing SSH connection to AWS EC2...'
+
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'aws-ec2-ssh',
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )
+                ]) {
+                    sh '''
+                        chmod 600 "$SSH_KEY"
+
+                        ssh \
+                          -i "$SSH_KEY" \
+                          -o StrictHostKeyChecking=no \
+                          -o ConnectTimeout=10 \
+                          "$SSH_USER@$AWS_HOST" \
+                          "echo AWS_CONNECTION_SUCCESSFUL"
+                    '''
                 }
             }
         }
 
-        stage('Build Docker Image') {
+        stage('Deploy to AWS EC2') {
             steps {
-                echo 'Building Enterprise Platform Docker Image...'
-                script {
-                    if (isUnix()) {
-                        sh 'docker build -t ${IMAGE_NAME} .'
-                    } else {
-                        bat 'docker build -t %IMAGE_NAME% .'
-                    }
+                echo 'Deploying latest version to AWS EC2...'
+
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'aws-ec2-ssh',
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )
+                ]) {
+
+                    sh '''
+                        chmod 600 "$SSH_KEY"
+
+                        ssh \
+                          -i "$SSH_KEY" \
+                          -o StrictHostKeyChecking=no \
+                          "$SSH_USER@$AWS_HOST" << 'REMOTE_SCRIPT'
+
+                            set -e
+
+                            echo "======================================"
+                            echo "Connected to AWS EC2"
+                            echo "======================================"
+
+                            cd ~/enterprise-platform
+
+                            echo "Pulling latest code from GitHub..."
+                            git fetch origin
+                            git reset --hard origin/main
+
+                            echo "Building Docker image..."
+                            docker build \
+                                -t enterprise-platform:latest \
+                                .
+
+                            echo "Stopping old container..."
+                            docker rm -f enterprise-platform 2>/dev/null || true
+
+                            echo "Starting new container..."
+                            docker run -d \
+                                --name enterprise-platform \
+                                -p 80:80 \
+                                enterprise-platform:latest
+
+                            echo "Waiting for application..."
+                            sleep 5
+
+                            echo "Checking container..."
+                            docker ps
+
+                            echo "Checking application health..."
+                            curl -fsS http://localhost | grep -i "OmniPolicy"
+
+                            echo "======================================"
+                            echo "AWS DEPLOYMENT SUCCESSFUL"
+                            echo "======================================"
+
+REMOTE_SCRIPT
+                    '''
                 }
             }
         }
 
-        stage('Deploy Container') {
+        stage('Deployment Verification') {
             steps {
-                echo 'Deploying Enterprise Platform Docker Container...'
-                script {
-                    if (isUnix()) {
-                        sh 'docker rm -f ${CONTAINER_NAME} 2>/dev/null || true'
-                        sh 'docker run -d -p ${HOST_PORT}:80 --name ${CONTAINER_NAME} ${IMAGE_NAME}'
-                    } else {
-                        bat 'docker rm -f %CONTAINER_NAME% 2>NUL || echo Container stopped'
-                        bat 'docker run -d -p %HOST_PORT%:80 --name %CONTAINER_NAME% %IMAGE_NAME%'
-                    }
-                }
-            }
-        }
+                echo 'Verifying public AWS application...'
 
-        stage('Health Verification') {
-            steps {
-                echo 'Verifying container deployment health...'
-                script {
-                    if (isUnix()) {
-                        sh 'docker exec ${CONTAINER_NAME} wget -qO- http://localhost:80 | grep -i "OmniPolicy"'
-                    } else {
-                        bat 'curl -s http://localhost:8085 | findstr /I "OmniPolicy"'
-                    }
-                }
+                sh '''
+                    curl -fsS http://16.171.33.162 | grep -i "OmniPolicy"
+                '''
             }
         }
     }
 
     post {
         success {
-            echo 'Enterprise Policy Administration Platform CI/CD Pipeline Completed Successfully!'
+            echo '======================================'
+            echo 'CI/CD DEPLOYMENT SUCCESSFUL!'
+            echo 'Application deployed to AWS EC2.'
+            echo 'URL: http://16.171.33.162'
+            echo '======================================'
         }
+
         failure {
-            echo 'Pipeline Execution Failed. Please check Jenkins logs.'
+            echo '======================================'
+            echo 'CI/CD PIPELINE FAILED'
+            echo 'Check the Console Output.'
+            echo '======================================'
         }
     }
 }
